@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 from burp import IBurpExtender, IHttpListener, IContextMenuFactory, ITab
 from java.util import ArrayList
 from java.net import URL
@@ -23,12 +22,15 @@ class BurpExtender(IBurpExtender, IHttpListener, IContextMenuFactory, ITab):
         self.main_panel = JPanel()
         self.main_panel.setLayout(BoxLayout(self.main_panel, BoxLayout.Y_AXIS))
 
-        self.label = JLabel("JS Endpoint Extractor Dashboard")
+        self.label = JLabel("Hudhud - API Endpoint Scanner")
         self.label.setFont(Font("Arial", Font.BOLD, 16))
         self.main_panel.add(self.label)
-
         self.counter_label = JLabel("Extracted: 0 endpoints")
         self.main_panel.add(self.counter_label)
+
+        self.stats_label = JLabel("Statistics: GET: 0 | POST: 0 | PUT: 0 | DELETE: 0 | PATCH: 0 | Paths: 0")
+        self.stats_label.setFont(Font("Arial", Font.PLAIN, 12))
+        self.main_panel.add(self.stats_label)
 
         self.root_node = DefaultMutableTreeNode("JS Files")
         self.tree_model = DefaultTreeModel(self.root_node)
@@ -54,6 +56,8 @@ class BurpExtender(IBurpExtender, IHttpListener, IContextMenuFactory, ITab):
             with open(filepath, "w") as f:
                 for (line, _) in sorted(self.saved_endpoints, key=lambda x: re.sub(r'^\[(GET|POST|PUT|DELETE|PATCH|Path|Full)\]\s+', '', x[0]).lower()):
                     endpoint = re.sub(r'^\[(GET|POST|PUT|DELETE|PATCH|Path|Full)\]\s+', '', line)
+                    if endpoint.startswith('/'):
+                        endpoint = endpoint[1:]
                     f.write(endpoint + "\n")
             JOptionPane.showMessageDialog(self.main_panel, "Endpoints exported to: " + filepath)
         except Exception as e:
@@ -168,7 +172,8 @@ class BurpExtender(IBurpExtender, IHttpListener, IContextMenuFactory, ITab):
         if found:
             self.add_to_tree(source_url, found)
             self.update_counter()
-
+            self.update_statistics()
+    
     def add_to_tree(self, js_url, endpoint_list):
         if js_url not in self.tree_nodes:
             label = "{} ({})".format(js_url, len(endpoint_list))
@@ -177,18 +182,93 @@ class BurpExtender(IBurpExtender, IHttpListener, IContextMenuFactory, ITab):
             self.tree_model.insertNodeInto(js_node, self.root_node, self.root_node.getChildCount())
         else:
             js_node = self.tree_nodes[js_url]
-            label = "{} ({})".format(js_url, js_node.getChildCount() + len(endpoint_list))
+            current_count = 0
+            for i in range(js_node.getChildCount()):
+                child = js_node.getChildAt(i)
+                if child.getChildCount() > 0:
+                    current_count += child.getChildCount()
+                else:
+                    current_count += 1
+            label = "{} ({})".format(js_url, current_count + len(endpoint_list))
             js_node.setUserObject(label)
-
-    #  Sort alphabetically before adding
+        
+        segment_counts = {}
+        endpoint_data = []
+        
         for ep in sorted(endpoint_list, key=lambda x: re.sub(r'^\[(GET|POST|PUT|DELETE|PATCH|Path|Full)\]\s+', '', x).lower()):
-            ep_node = DefaultMutableTreeNode(ep.strip())
+            clean_endpoint = re.sub(r'^\[(GET|POST|PUT|DELETE|PATCH|Path|Full)\]\s+', '', ep.strip())
+            
+            if clean_endpoint.startswith('/'):
+                clean_endpoint = clean_endpoint[1:]
+            
+            first_segment = None
+            if '/' in clean_endpoint:
+                first_segment = clean_endpoint.split('/')[0]
+                if first_segment:
+                    segment_counts[first_segment] = segment_counts.get(first_segment, 0) + 1
+            
+            endpoint_data.append((ep.strip(), first_segment))
+        
+        segment_nodes_key = js_url + "_segments"
+        if segment_nodes_key not in self.tree_nodes:
+            self.tree_nodes[segment_nodes_key] = {}
+        segment_nodes = self.tree_nodes[segment_nodes_key]
+        
+        grouped_segments = set()
+        ungrouped_endpoints = []
+        
+        for ep, first_segment in endpoint_data:
+            if first_segment and segment_counts.get(first_segment, 0) > 1:
+                grouped_segments.add(first_segment)
+        
+        for segment in sorted(grouped_segments):
+            if segment not in segment_nodes:
+                segment_label = "{} ({})".format(segment, segment_counts[segment])
+                segment_node = DefaultMutableTreeNode(segment_label)
+                segment_nodes[segment] = segment_node
+                js_node.add(segment_node)
+            else:
+                segment_node = segment_nodes[segment]
+                current_count = segment_node.getChildCount()
+                new_count = current_count + segment_counts[segment]
+                segment_label = "{} ({})".format(segment, new_count)
+                segment_node.setUserObject(segment_label)
+        
+        for ep, first_segment in endpoint_data:
+            if first_segment and first_segment in grouped_segments:
+                segment_node = segment_nodes[first_segment]
+                ep_node = DefaultMutableTreeNode(ep)
+                segment_node.add(ep_node)
+            else:
+                ungrouped_endpoints.append(ep)
+        
+        for ep in sorted(ungrouped_endpoints, key=lambda x: re.sub(r'^\[(GET|POST|PUT|DELETE|PATCH|Path|Full)\]\s+', '', x).lower()):
+            ep_node = DefaultMutableTreeNode(ep)
             js_node.add(ep_node)
 
         self.tree_model.reload()
-
+            
     def update_counter(self):
         self.counter_label.setText("Extracted: {} endpoints".format(len(self.saved_endpoints)))
+
+    def update_statistics(self):
+        """Update the statistics label with method counts"""
+        method_counts = {"GET": 0, "POST": 0, "PUT": 0, "DELETE": 0, "PATCH": 0, "Path": 0}
+        
+        for (line, _) in self.saved_endpoints:
+            for method in method_counts:
+                if line.startswith("[" + method + "]"):
+                    method_counts[method] += 1
+                    break
+        
+        stats_text = "Statistics: "
+        stats_parts = []
+        for method, count in method_counts.items():
+            if count > 0:  
+                stats_parts.append("{}: {}".format(method, count))
+        
+        stats_text += " | ".join(stats_parts)
+        self.stats_label.setText(stats_text)
 
     def clear_all_memory_and_log(self, event):
         self.saved_endpoints.clear()
@@ -197,6 +277,7 @@ class BurpExtender(IBurpExtender, IHttpListener, IContextMenuFactory, ITab):
         self.root_node.removeAllChildren()
         self.tree_model.reload()
         self.counter_label.setText("Extracted: 0 endpoints")
+        self.stats_label.setText("Statistics: GET: 0 | POST: 0 | PUT: 0 | DELETE: 0 | PATCH: 0 | Paths: 0")  
 
     def is_noise_path(self, path):
         path_lower = path.lower()
